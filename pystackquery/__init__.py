@@ -1,28 +1,27 @@
 """
-PyStackQuery - Async data fetching and caching library for Python.
+PyStackQuery - Async state management and caching for Python.
 
-A powerful library for managing server state in Python applications:
-    - Automatic caching with configurable staleness
-    - Request deduplication
-    - Automatic retry with exponential backoff
-    - Reactive state updates via observers
-    - Partial key invalidation
-    - Mutations with lifecycle callbacks
+Inspired by TanStack Query, this library provides a robust L1/L2 caching
+architecture designed for async Python applications (FastAPI, CLI, GUI).
+
+Core Features:
+    - SWR (Stale-While-Revalidate) caching logic
+    - Background L2 hydration (Redis, SQLite, etc.)
+    - Request deduplication and exponential backoff retries
+    - Reactive state observers with synchronous subscription
+    - Mutations with optimistic update support
 
 Example:
     from pystackquery import QueryClient, QueryOptions
 
     client = QueryClient()
 
-    # Fetch with automatic caching
-    users = await client.fetch_query(
-        QueryOptions(query_key=("users",), query_fn=fetch_users)
-    )
-
-    # Reactive updates
+    # Create a reactive observer
     observer = client.watch(
         QueryOptions(query_key=("users",), query_fn=fetch_users)
     )
+
+    # Subscribe is synchronous
     unsubscribe = observer.subscribe(lambda state: print(state.data))
 """
 
@@ -41,7 +40,7 @@ from .state import (
     QueryState,
     QueryStatus,
 )
-from .types import QueryKey
+from .types import QueryKey, StorageBackend
 
 __version__ = "1.0.0"
 
@@ -65,6 +64,7 @@ __all__ = [
     "QueryCache",
     # Types
     "QueryKey",
+    "StorageBackend",
     # Helpers
     "hash_key",
     "partial_match",

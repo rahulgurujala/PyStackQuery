@@ -2,7 +2,7 @@
 name = "pystackquery"
 version = "1.0.0"
 description = "Async data fetching and caching library for Python"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 keywords = ["async", "cache", "data-fetching", "query", "state-management"]
 classifiers = [
@@ -36,13 +36,13 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true

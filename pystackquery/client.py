@@ -1,14 +1,15 @@
 """
-QueryClient - the main entry point for PyStackQuery.
+QueryClient - Central orchestrator for state management and caching.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import cast
 
 from .cache import QueryCache
 from .helpers import default_retry_delay, hash_key
@@ -17,7 +18,7 @@ from .observer import QueryObserver
 from .options import MutationOptions, QueryOptions
 from .query import Query
 from .state import FetchStatus, QueryState, QueryStatus
-from .types import QueryKey, RetryDelayFn, T, TData, TInput
+from .types import QueryKey, RetryDelayFn, StorageBackend
 
 logger = logging.getLogger("pystackquery")
 
@@ -25,72 +26,61 @@ logger = logging.getLogger("pystackquery")
 @dataclass
 class QueryClientConfig:
     """
-    Global defaults for all queries managed by a QueryClient.
-
-    Attributes:
-        stale_time: Default seconds before data is stale (default: 0).
-        gc_time: Default seconds before inactive query is collected (default: 300).
-        retry: Default retry attempts (default: 3).
-        retry_delay: Default retry delay function.
-        cache_max_size: Maximum queries to cache (default: 1000).
+    Global defaults for the client instance. Individual queries can override these.
     """
-
     stale_time: float = 0.0
     gc_time: float = 300.0
     retry: int = 3
     retry_delay: RetryDelayFn = field(default_factory=lambda: default_retry_delay)
     cache_max_size: int = 1000
+    storage: StorageBackend | None = None
 
 
 class QueryClient:
     """
-    Central orchestrator for queries and mutations.
-
-    Manages the query cache and provides the primary API for:
-        - Fetching and caching data
-        - Invalidating stale data
-        - Creating mutations
-
-    Example:
-        client = QueryClient()
-        data = await client.fetch_query(
-            QueryOptions(query_key=("users",), query_fn=fetch_users)
-        )
+    Main entry point for PyStackQuery.
+    Manages the dual-tier cache (L1 memory, L2 persistent).
     """
 
     __slots__ = ("_config", "_cache")
 
     def __init__(self, config: QueryClientConfig | None = None) -> None:
-        """
-        Initialize a QueryClient.
-
-        Args:
-            config: Optional configuration with default values.
-        """
         self._config: QueryClientConfig = config or QueryClientConfig()
-        self._cache: QueryCache = QueryCache(max_size=self._config.cache_max_size)
+        self._cache: QueryCache = QueryCache(
+            max_size=self._config.cache_max_size, storage=self._config.storage
+        )
 
     @property
     def cache(self) -> QueryCache:
-        """The underlying query cache."""
         return self._cache
 
-    def _get_or_create_query(self, options: QueryOptions[T]) -> Query[T]:
+    def _get_or_create_query[T](self, options: QueryOptions[T]) -> Query[T]:
         """
-        Get existing query from cache or create a new one.
-
-        Args:
-            options: Query configuration.
-
-        Returns:
-            The Query instance.
+        Retrieves a query from L1 or creates it fresh.
+        If L2 storage exists, a background hydration task is kicked off immediately.
         """
         key_hash = options.get_key_hash()
-        existing = self._cache.get(key_hash)
+
+        # L1 Hit (Fastest)
+        existing: Query[T] | None = self._cache.get(key_hash)
         if existing is not None:
             return existing
 
-        # Apply client-level defaults
+        # Cache Miss - Setup new instance and start hydration
+        query: Query[T] = self._create_query_instance(options)
+        self._cache.add(query)
+
+        if self._cache.storage:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(query.hydrate())
+            except RuntimeError:
+                pass # Sync context or loop shutting down
+
+        return query
+
+    def _create_query_instance[T](self, options: QueryOptions[T]) -> Query[T]:
+        """Inherits client-level defaults for query instances."""
         if options.stale_time == 0.0 and self._config.stale_time != 0.0:
             options.stale_time = self._config.stale_time
         if options.gc_time == 300.0 and self._config.gc_time != 300.0:
@@ -98,101 +88,77 @@ class QueryClient:
         if options.retry == 3 and self._config.retry != 3:
             options.retry = self._config.retry
 
-        query: Query[T] = Query(options)
-        self._cache.add(query)
-        return query
+        return Query(options, storage=self._cache.storage)
 
-    async def fetch_query(self, options: QueryOptions[T]) -> T:
+    async def fetch_query[T](self, options: QueryOptions[T]) -> T:
         """
-        Fetch query data with automatic caching.
-
-        - If cached and fresh, returns immediately
-        - If cached but stale, returns stale data and refetches in background
-        - If not cached, fetches and caches
-
-        Args:
-            options: Query configuration.
-
-        Returns:
-            The query data.
+        Implementation of the Stale-While-Revalidate (SWR) pattern.
+        Ensures L2 hydration is settled before checking data availability.
         """
-        query = self._get_or_create_query(options)
+        query: Query[T] = self._get_or_create_query(options)
 
-        # Fresh data available
-        if query.state.data is not None and not query.is_stale():
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Cache HIT (fresh) for %s", options.query_key)
-            return query.state.data
+        # Ensure L2 hydration settles so we don't double-fetch cold data
+        await asyncio.sleep(0)
+        await query.wait_for_hydration()
 
-        # Stale data available - return it, refetch in background
-        if query.state.data is not None and query.is_stale():
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Cache HIT (stale) for %s, bg refetch", options.query_key)
+        if query.state.data is not None:
+            if not query.is_stale():
+                return query.state.data
+
+            # Data exists but is stale - return it and trigger background refresh
             asyncio.create_task(query.fetch())
             return query.state.data
 
-        # No data - must fetch
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Cache MISS for %s", options.query_key)
+        # Cold fetch (Miss)
         return await query.fetch()
 
-    async def prefetch_query(self, options: QueryOptions[T]) -> None:
-        """
-        Prefetch and cache data without returning it.
-
-        Useful for anticipating user navigation.
-
-        Args:
-            options: Query configuration.
-        """
-        query = self._get_or_create_query(options)
+    async def prefetch_query[T](self, options: QueryOptions[T]) -> None:
+        """Warms up the cache for a key without blocking for the result."""
+        query: Query[T] = self._get_or_create_query(options)
+        await query.wait_for_hydration()
         if query.state.data is None or query.is_stale():
             try:
                 await query.fetch()
             except Exception:
-                pass  # Prefetch failures are silent
+                pass # Prefetches fail silently
 
-    def get_query_data(self, key: QueryKey) -> Any | None:
-        """
-        Get cached data for a query key.
+    async def get_query_data_async[T](self, key: QueryKey) -> T | None:
+        """Checks both memory and persistence for data."""
+        key_hash = hash_key(key)
+        existing: Query[object] | None = self._cache.get(key_hash)
+        if existing:
+            return cast(T, existing.state.data)
 
-        Args:
-            key: The query key.
+        if self._cache.storage:
+            try:
+                serialized = await self._cache.storage.get(key_hash)
+                if serialized:
+                    state_dict = cast(dict[str, object], json.loads(serialized))
+                    return cast(T, state_dict.get("data"))
+            except Exception:
+                pass
+        return None
 
-        Returns:
-            Cached data or None.
-        """
-        query = self._cache.get(hash_key(key))
-        return query.state.data if query else None
+    def get_query_data[T](self, key: QueryKey) -> T | None:
+        """Memory-only data retrieval."""
+        query: Query[object] | None = self._cache.get(hash_key(key))
+        return cast(T, query.state.data) if query else None
 
-    def set_query_data(self, key: QueryKey, data: Any) -> None:
-        """
-        Manually update cached data for a query key.
-
-        Args:
-            key: The query key.
-            data: The data to cache.
-        """
-        query = self._cache.get(hash_key(key))
+    def set_query_data[T](self, key: QueryKey, data: T) -> None:
+        """Manual cache injection. Triggers persistence to L2."""
+        query: Query[object] | None = self._cache.get(hash_key(key))
         if query:
             query._dispatch(
                 status=QueryStatus.SUCCESS,
                 data=data,
-                data_updated_at=time.monotonic(),
+                data_updated_at=time.time(),
             )
 
-    def get_query_state(self, key: QueryKey) -> QueryState[Any] | None:
-        """
-        Get the full state for a query key.
-
-        Args:
-            key: The query key.
-
-        Returns:
-            QueryState or None if not cached.
-        """
-        query = self._cache.get(hash_key(key))
-        return query.state if query else None
+    def get_query_state[
+        T, TError: Exception
+    ](self, key: QueryKey) -> QueryState[T, TError] | None:
+        query: Query[object] | None = self._cache.get(hash_key(key))
+        return cast(QueryState[T, TError], query.state) if query else None
 
     async def invalidate_queries(
         self,
@@ -201,47 +167,28 @@ class QueryClient:
         refetch: bool = True,
     ) -> None:
         """
-        Invalidate queries matching the filter key.
-
-        Uses partial matching - invalidating ("users",) will also
-        invalidate ("users", "123").
-
-        Args:
-            filter_key: Partial key to match. None invalidates all.
-            refetch: Whether to refetch active queries (default: True).
+        Marks matching queries as stale (data_updated_at=0).
+        Active observers will trigger an immediate refetch.
         """
         queries = self._cache.find_all(filter_key)
-        tasks: list[asyncio.Task[Any]] = []
+        tasks: list[asyncio.Task[object]] = []
 
         for query in queries:
-            query._dispatch(data_updated_at=0.0)
+            query._dispatch(data_updated_at=0.0) # Mark stale in L1/L2
             if refetch and query.observer_count > 0:
                 tasks.append(asyncio.create_task(query.fetch()))
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Invalidated %d queries matching %s", len(queries), filter_key)
-
     def remove_queries(self, filter_key: QueryKey | None = None) -> None:
-        """
-        Remove queries from cache entirely.
-
-        Args:
-            filter_key: Partial key to match. None removes all.
-        """
+        """Hard removal from L1 cache."""
         queries = self._cache.find_all(filter_key)
         for q in queries:
             self._cache.remove(q.key_hash)
 
     def reset_queries(self, filter_key: QueryKey | None = None) -> None:
-        """
-        Reset queries to their initial state.
-
-        Args:
-            filter_key: Partial key to match. None resets all.
-        """
+        """Reverts queries to IDLE state."""
         queries = self._cache.find_all(filter_key)
         for q in queries:
             q._dispatch(
@@ -255,33 +202,18 @@ class QueryClient:
                 fetch_failure_reason=None,
             )
 
-    def watch(self, options: QueryOptions[T]) -> QueryObserver[T]:
-        """
-        Create an observer for reactive state updates.
-
-        Args:
-            options: Query configuration.
-
-        Returns:
-            QueryObserver to subscribe to.
-        """
+    def watch[T](self, options: QueryOptions[T]) -> QueryObserver[T]:
+        """Creates a reactive observer for the given options."""
         return QueryObserver(client=self, options=options)
 
-    def mutation(
+    def mutation[TInput, TData](
         self,
         options: MutationOptions[TInput, TData],
     ) -> Mutation[TInput, TData]:
-        """
-        Create a mutation instance.
-
-        Args:
-            options: Mutation configuration.
-
-        Returns:
-            Mutation instance.
-        """
         return Mutation(options=options, client=self)
 
     def clear(self) -> None:
-        """Clear the entire cache and destroy all queries."""
+        """Wipe memory cache."""
         self._cache.clear()
+
+

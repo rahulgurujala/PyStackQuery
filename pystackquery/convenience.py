@@ -5,17 +5,18 @@ Convenience functions and decorators for common patterns.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Generic
+from collections.abc import Awaitable, Callable
+from typing import cast
 
 from .client import QueryClient
 from .options import QueryOptions
-from .types import QueryKey, T
+from .types import QueryKey
 
 
 async def parallel_queries(
     client: QueryClient,
-    *options_list: QueryOptions[Any],
-) -> list[Any]:
+    *options_list: QueryOptions[object],
+) -> list[object]:
     """
     Execute multiple queries in parallel.
 
@@ -40,11 +41,11 @@ async def parallel_queries(
     return await asyncio.gather(*(client.fetch_query(opts) for opts in options_list))
 
 
-async def dependent_query(
+async def dependent_query[T](
     client: QueryClient,
     depends_on: QueryOptions[T],
-    then: Callable[[T], QueryOptions[Any]],
-) -> Any:
+    then: Callable[[T], QueryOptions[object]],
+) -> object:
     """
     Execute a query that depends on the result of another query.
 
@@ -74,7 +75,7 @@ async def dependent_query(
     return await client.fetch_query(child_options)
 
 
-class CachedQuery(Generic[T]):
+class CachedQuery[T]:
     """
     A cached query wrapper that provides caching utilities.
 
@@ -83,16 +84,13 @@ class CachedQuery(Generic[T]):
 
     __slots__ = ("_client", "_options")
 
-    _client: QueryClient
-    _options: QueryOptions[T]
-
     def __init__(
         self,
         client: QueryClient,
         options: QueryOptions[T],
     ) -> None:
-        self._client = client
-        self._options = options
+        self._client: QueryClient = client
+        self._options: QueryOptions[T] = options
 
     async def __call__(self) -> T:
         """Execute the cached query."""
@@ -104,7 +102,7 @@ class CachedQuery(Generic[T]):
 
     def get_data(self) -> T | None:
         """Get the currently cached data."""
-        return self._client.get_query_data(self._options.query_key)
+        return cast(T, self._client.get_query_data(self._options.query_key))
 
     @property
     def options(self) -> QueryOptions[T]:
@@ -112,7 +110,7 @@ class CachedQuery(Generic[T]):
         return self._options
 
 
-def query(
+def query[T](
     client: QueryClient,
     key: QueryKey,
     *,

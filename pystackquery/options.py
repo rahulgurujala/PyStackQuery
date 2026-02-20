@@ -4,8 +4,8 @@ Configuration options for queries and mutations.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Generic
 
 from .helpers import default_retry_delay, hash_key
 from .types import (
@@ -20,14 +20,11 @@ from .types import (
     SelectFn,
     SettledCallback,
     SuccessCallback,
-    T,
-    TData,
-    TInput,
 )
 
 
 @dataclass
-class QueryOptions(Generic[T]):
+class QueryOptions[T]:
     """
     Configuration for a query.
 
@@ -79,7 +76,7 @@ class QueryOptions(Generic[T]):
 
 
 @dataclass
-class MutationOptions(Generic[TInput, TData]):
+class MutationOptions[TInput, TData]:
     """
     Configuration for a mutation.
 
@@ -98,7 +95,7 @@ class MutationOptions(Generic[TInput, TData]):
     on_success: MutationSuccessCallback[TData, TInput] | None = None
     on_error: MutationErrorCallback[TInput] | None = None
     on_settled: MutationSettledCallback[TData, TInput] | None = None
-    on_mutate: Callable[[TInput], Awaitable[Any] | Any] | None = None
+    on_mutate: Callable[[TInput], Awaitable[object] | object] | None = None
 
     retry: int = 0
     retry_delay: RetryDelayFn = field(default_factory=lambda: default_retry_delay)

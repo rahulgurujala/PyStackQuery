@@ -5,9 +5,11 @@ Query state management.
 from __future__ import annotations
 
 from enum import Enum, auto
-from typing import Generic
+from typing import cast
 
-from .types import T, TError
+# ─────────────────────────────────────────────────────────────
+# Enums
+# ─────────────────────────────────────────────────────────────
 
 
 class QueryStatus(Enum):
@@ -39,7 +41,12 @@ class FetchStatus(Enum):
     """Fetch paused (e.g., offline)."""
 
 
-class QueryState(Generic[T, TError]):
+# ─────────────────────────────────────────────────────────────
+# Query State (Python 3.12+ Generics)
+# ─────────────────────────────────────────────────────────────
+
+
+class QueryState[T, TError: Exception]:
     """
     Query state container with optimized attribute access.
 
@@ -116,12 +123,67 @@ class QueryState(Generic[T, TError]):
         """True if data is available."""
         return self.data is not None
 
+    def to_dict(self) -> dict[str, object]:
+        """
+        Serialize state for persistent storage.
+
+        Note: Exceptions are stored as their string representation.
+        """
+        return {
+            "status": self.status.name,
+            "fetch_status": self.fetch_status.name,
+            "data": self.data,
+            "error": str(self.error) if self.error else None,
+            "data_updated_at": self.data_updated_at,
+            "error_updated_at": self.error_updated_at,
+            "fetch_failure_count": self.fetch_failure_count,
+            "fetch_failure_reason": (
+                str(self.fetch_failure_reason) if self.fetch_failure_reason else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> QueryState[T, TError]:
+        """
+        Deserialize state from persistent storage.
+        """
+        # Type safety: values in dict are objects, we cast to expected types
+        return cls(
+            status=QueryStatus[cast(str, d["status"])],
+            fetch_status=FetchStatus[cast(str, d["fetch_status"])],
+            data=cast(T, d["data"]),
+            error=(
+                cast(TError, Exception(cast(str, d["error"])))
+                if d.get("error")
+                else None
+            ),
+            data_updated_at=(
+                cast(float, d["data_updated_at"]) if d.get("data_updated_at") else None
+            ),
+            error_updated_at=(
+                cast(float, d.get("error_updated_at"))
+                if d.get("error_updated_at")
+                else None
+            ),
+            fetch_failure_count=cast(int, d.get("fetch_failure_count", 0)),
+            fetch_failure_reason=(
+                cast(TError, Exception(cast(str, d["fetch_failure_reason"])))
+                if d.get("fetch_failure_reason")
+                else None
+            ),
+        )
+
     def __repr__(self) -> str:
         return (
             f"QueryState(status={self.status.name}, "
             f"fetch_status={self.fetch_status.name}, "
             f"has_data={self.has_data})"
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# Mutation State
+# ─────────────────────────────────────────────────────────────
 
 
 class MutationStatus(Enum):
@@ -140,7 +202,7 @@ class MutationStatus(Enum):
     """Mutation resulted in an error."""
 
 
-class MutationState(Generic[T, TError]):
+class MutationState[T, TError: Exception]:
     """
     Mutation state container with optimized attribute access.
 

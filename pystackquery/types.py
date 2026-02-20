@@ -4,31 +4,14 @@ Type definitions for PyStackQuery.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
-
-from typing_extensions import TypeVar
-
-# ─────────────────────────────────────────────────────────────
-# Type Variables
-# ─────────────────────────────────────────────────────────────
-
-T = TypeVar("T")
-"""Generic type for query data."""
-
-TData = TypeVar("TData")
-"""Generic type for mutation return data."""
-
-TInput = TypeVar("TInput")
-"""Generic type for mutation input."""
-
-TError = TypeVar("TError", bound=Exception, default=Exception)
-"""Generic type for errors. Defaults to Exception if not specified."""
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 # ─────────────────────────────────────────────────────────────
-# Type Aliases
+# Type Aliases (Python 3.12+)
 # ─────────────────────────────────────────────────────────────
 
-QueryKey = tuple[str, ...]
+type QueryKey = tuple[str, ...]
 """
 Tuple-based unique identifier for queries.
 
@@ -38,32 +21,60 @@ Examples:
     ("posts", "user", "42", "page", "1")
 """
 
-QueryFn = Callable[[], Awaitable[T]]
+type QueryFn[T] = Callable[[], Awaitable[T]]
 """Async function that fetches data."""
 
-RetryDelayFn = Callable[[int], float]
+type RetryDelayFn = Callable[[int], float]
 """Function that returns delay in seconds for a given retry attempt."""
 
-SuccessCallback = Callable[[T], Any]
+type SuccessCallback[T] = Callable[[T], object]
 """Callback invoked on successful fetch."""
 
-ErrorCallback = Callable[[Exception], Any]
+type ErrorCallback = Callable[[Exception], object]
 """Callback invoked on fetch error."""
 
-SettledCallback = Callable[[T | None, Exception | None], Any]
+type SettledCallback[T] = Callable[[T | None, Exception | None], object]
 """Callback invoked when fetch completes (success or error)."""
 
-MutationFn = Callable[[TInput], Awaitable[TData]]
+type MutationFn[TInput, TData] = Callable[[TInput], Awaitable[TData]]
 """Async function that performs a mutation."""
 
-MutationSuccessCallback = Callable[[TData, TInput], Any]
+type MutationSuccessCallback[TData, TInput] = Callable[[TData, TInput], object]
 """Callback invoked on successful mutation."""
 
-MutationErrorCallback = Callable[[Exception, TInput], Any]
+type MutationErrorCallback[TInput] = Callable[[Exception, TInput], object]
 """Callback invoked on mutation error."""
 
-MutationSettledCallback = Callable[[TData | None, Exception | None, TInput], Any]
+type MutationSettledCallback[TData, TInput] = Callable[
+    [TData | None, Exception | None, TInput], object
+]
 """Callback invoked when mutation completes."""
 
-SelectFn = Callable[[T], Any]
+type SelectFn[T] = Callable[[T], object]
 """Function to transform query data before returning to observers."""
+
+
+# ─────────────────────────────────────────────────────────────
+# Storage Protocols
+# ─────────────────────────────────────────────────────────────
+
+
+class StorageBackend(Protocol):
+    """
+    Interface for external caching tools (Redis, aiocache, diskcache, etc.).
+
+    Any class that implements these methods can be used as a persistent
+    L2 cache for PyStackQuery.
+    """
+
+    async def get(self, key: str) -> str | None:
+        """Get serialized data for a key."""
+        ...
+
+    async def set(self, key: str, value: str, ttl: float | None = None) -> None:
+        """Set serialized data for a key with optional TTL."""
+        ...
+
+    async def delete(self, key: str) -> None:
+        """Delete data for a key."""
+        ...
