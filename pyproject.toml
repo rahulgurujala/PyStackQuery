@@ -1,7 +1,8 @@
 [project]
 name = "pystackquery"
-version = "1.0.1"
+version = "1.0.2"
 description = "Async data fetching and caching library for Python"
+readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 keywords = ["async", "cache", "data-fetching", "query", "state-management"]
